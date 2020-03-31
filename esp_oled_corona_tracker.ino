@@ -297,8 +297,6 @@ void mqttConnect()
     DEBUG_PRINTLN("connected");
     // Once connected, publish an announcement...
     mqttClient.publish("/esp32oled/state", connect_msg.c_str(), true);
-    mqttClient.subscribe("/esp32oled/set");
-
   }
   else {
     DEBUG_PRINT("failed, mqttClient.state = ");
@@ -321,18 +319,14 @@ void mqttCallback(char* topic, byte* payload, unsigned int length)
   DEBUG_PRINTLN(value);
 
   if (0 == strcmp("/esp32oled/set", topic)) {
-    // String oled_text((char*)payload);
-    // oled_text[length] = '\0';
-
     DEBUG_PRINTLN("wemos esp32oled set");
-
     if (0 == memcmp("logo", payload, 4)) {
       DEBUG_PRINTLN("wemos set logo");
-      drawLogo(&display);
-      drawInfo(&display);
+      //drawLogo(&display);
+      //drawInfo(&display);
     }
     else {
-      drawText(&display, value);
+      //drawText(&display, value);
     }
   }
 }
@@ -499,7 +493,7 @@ void setup() {
 
   DEBUG_PRINTLN("set mqtt host/port and callback");
   mqttClient.setServer(mqtt_host, mqtt_port);
-  mqttClient.setCallback(mqttCallback);
+  //mqttClient.setCallback(mqttCallback);
 
   DEBUG_PRINTLN("calling mqttConnect()");
   mqttConnect();
