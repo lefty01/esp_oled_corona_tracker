@@ -63,6 +63,7 @@ bool mqttConnected = false;
 
 // global object pointing to received json data
 struct covid19Data_t {
+  String country;
   String cases;
   String time;
   String todayCases;
@@ -105,7 +106,7 @@ OLEDDisplayUi ui(&display);
 
 
 // ******  PROGRAM VERSION ******
-const char* VERSION = "0.4";
+const char* VERSION = "0.4.3";
 
 
 void drawProgress(OLEDDisplay *display, int percentage, String label) {
@@ -152,12 +153,18 @@ void drawText(OLEDDisplay *display, const char *text) {
 // Frames ...
 void startFrame(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y)
 {
+  display->setFont(ArialMT_Plain_10);
+  display->setTextAlignment(TEXT_ALIGN_CENTER);
+  display->drawString(64 + x,  5 + y, "COVID-19");
+
+  display->setFont(ArialMT_Plain_10);
+  display->setTextAlignment(TEXT_ALIGN_LEFT);
+  display->drawString(10 + x, 15 + y, "Tracker");
+  display->drawString(70 + x, 25 + y, "v" + String(VERSION));
+
   display->setFont(ArialMT_Plain_24);
   display->setTextAlignment(TEXT_ALIGN_CENTER);
-
-  display->drawString(64 + x,  5 + y, "COVID-19");
-  display->setFont(ArialMT_Plain_16);
-  display->drawString(64 + x, 30 + y, "Tracker");
+  display->drawString(64 + x,  33 + y, covid19Data.country);
 
   //display->drawXbm(x + 40,   y +  2, mqtt_width, mqtt_height, mqtt_bits);
   //display->drawString(x + 0, y + 50, "v" + String(VERSION) + ", ip: " + ipAddr);
@@ -334,16 +341,16 @@ void mqttCallback(char* topic, byte* payload, unsigned int length)
 
 /* get info about covid-19 infections/death
    {"country":"Germany",
-   "cases":63079,
-   "todayCases":644,
-   "deaths":545,
-   "todayDeaths":4,
-   "recovered":9211,
-   "active":53323,
-   "critical":1979,
-   "casesPerOneMillion":753,
-   "deathsPerOneMillion":7,
-   "firstCase":"\nJan 26 "}
+    "cases":63079,
+    "todayCases":644,
+    "deaths":545,
+    "todayDeaths":4,
+    "recovered":9211,
+    "active":53323,
+    "critical":1979,
+    "casesPerOneMillion":753,
+    "deathsPerOneMillion":7,
+    "firstCase":"\nJan 26 "}
  */
 int isValidNumber(int num)
 {
@@ -380,14 +387,14 @@ int getCovid19Data(OLEDDisplay *display)
 {
   HTTPClient http;
   int rc = 0;
-  //JsonObject root = {};
 
+  drawProgress(display, 10, "Updating time...");
+  timeClient.forceUpdate();
+
+  drawProgress(display, 40, "Fetching data...");
   http.begin(COVID19_DATA_URL, herokuapp_com_pem_str);
 
   int httpCode = http.GET();
-
-  // drawProgress();
-
 
   if (httpCode > 0) { //Check for the returning code
     String payload = http.getString();
@@ -411,6 +418,7 @@ int getCovid19Data(OLEDDisplay *display)
 	//covid19Data = jsonBuffer.as<JsonObject>();
 	//covid19Data = jsonBuffer;
 	covid19Data.valid = true;
+	covid19Data.country		= jsonBuffer["country"].as<String>();
 	covid19Data.cases		= jsonBuffer["cases"].as<String>();
 	covid19Data.todayCases		= jsonBuffer["todayCases"].as<String>();
 	covid19Data.deaths		= jsonBuffer["deaths"].as<String>();
@@ -421,6 +429,7 @@ int getCovid19Data(OLEDDisplay *display)
 	covid19Data.casesPerOneMillion	= jsonBuffer["casesPerOneMillion"].as<String>();
 	covid19Data.deathsPerOneMillion = jsonBuffer["deathsPerOneMillion"].as<String>();
 
+	mqttClient.publish("/esp32oled/covid19/country",	     covid19Data.country.c_str());
 	mqttClient.publish("/esp32oled/covid19/cases",		     covid19Data.cases.c_str());
 	mqttClient.publish("/esp32oled/covid19/todayCases",	     covid19Data.todayCases.c_str());
 	mqttClient.publish("/esp32oled/covid19/deaths",		     covid19Data.deaths.c_str());
@@ -439,6 +448,10 @@ int getCovid19Data(OLEDDisplay *display)
     covid19Data.valid = false;
     rc = 1;
   }
+  delay(1000);
+  drawProgress(display, 80, "Fetching data...");
+  delay(1000);
+  drawProgress(display, 100, "... Done");
 
   http.end(); // Free the resources
   return rc;
@@ -543,6 +556,7 @@ void loop() {
   // }
 
   // get data every X minute(s) / hour(s) ...
+  //  if (millis() > (time_1 + EVERY_MINUTE)) {
   if (millis() > (time_1 + EVERY_HOUR)) {
     readyForNewData = true;
     time_1 = millis();
