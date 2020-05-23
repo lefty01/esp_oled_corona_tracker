@@ -8,7 +8,7 @@
 // data sources:
 // https://coronavirus-19-api.herokuapp.com/countries/GERMANY
 // fingerprint: 2F:0E:48:24:F8:BA:05:3E:42:40:77:76:55:61:50:F0:2A:DA:58:D2:05:FB:16:90:B8:1D:A6:6D:DD:76:C1:E4
-//
+//              
 
 
 #define DEBUG_ESP_SSL 1
@@ -19,13 +19,18 @@
 
 #ifdef ESP32
 #include <WiFi.h>
+#include <HTTPClient.h>
 #else
+// if ESP8266
 #include <ESP8266WiFi.h>
+#include <ESP8266WiFiMulti.h>
+#include <ESP8266HTTPClient.h>
+#include <WiFiClientSecureBearSSL.h>
+ESP8266WiFiMulti WiFiMulti;
 #endif
 
 #include <PubSubClient.h>
-#include <WiFiClientSecure.h>
-#include <HTTPClient.h>
+//#include <WiFiClientSecure.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 
@@ -46,18 +51,21 @@
 #define EVERY_5_MINUTE 5 * 60 * 1000
 
 #define GER_TZ_OFFSET 2*60*60
-#define COVID19_DATA_URL "https://coronavirus-19-api.herokuapp.com/countries/GERMANY"
+
+const String COVID19_DATA_URL = "https://coronavirus-19-api.herokuapp.com/countries/GERMANY";
+
+#define _UNUSED_ __attribute__((unused))
 
 unsigned long time_1 = 0;
 time_t now;
+//bool readyForNewData = true;
 bool readyForNewData = false;
 
 String ipAddr;
 String dnsAddr;
 String rssi;
 
-const unsigned max_wifi_wait_seconds = 60;
-const char* mqtt_device_id = "wemosEsp32_oled";
+const unsigned maxWifiWaitSeconds = 60;
 const int maxMqttRetry = 5;
 bool mqttConnected = false;
 
@@ -74,9 +82,11 @@ struct covid19Data_t {
   String critical;
   String casesPerOneMillion;
   String deathsPerOneMillion;
+  String totalTests;
+  String testsPerOneMillion;
   bool valid;
 } covid19Data;
-
+covid19Data_t covid19Data_prev;
 
 // Initialize the OLED display using Wire library
 // ESP8266 | ESP32 | pin
@@ -86,18 +96,47 @@ struct covid19Data_t {
 #ifdef ESP32
 WiFiClientSecure net;
 SSD1306Wire display(0x3c, 5, 4);
+
+#define MQTTDEVICEID  "wemosEsp32_oled"
 #else
+// if ESP8266
 BearSSL::X509List   server_cert(server_crt_str);
 BearSSL::X509List   client_crt(client_crt_str);
 BearSSL::PrivateKey client_key(client_key_str);
 BearSSL::WiFiClientSecure net;
+
+BearSSL::X509List   herokuapp_cert(herokuapp_com_pem_str);
+//BearSSL::WiFiClientSecure https_client;
+
 SSD1306Wire display(0x3c, D3, D5);
+
+#define MQTTDEVICEID  "wemosD1_oled"
 #endif
+
+const char* mqttSet      = "/" MQTTDEVICEID "/set";
+const char* mqttState    = "/" MQTTDEVICEID "/state";
+const char* mqttDateTime = "/" MQTTDEVICEID "/datetime";
+
+const char* mqtt    = "/" MQTTDEVICEID "/state";
+
+const char* mqttCovidCountry             = "/" MQTTDEVICEID "/covid19/country";
+const char* mqttCovidCases               = "/" MQTTDEVICEID "/covid19/cases";
+const char* mqttCovidTodayCases          = "/" MQTTDEVICEID "/covid19/todayCases";
+const char* mqttCovidDeaths              = "/" MQTTDEVICEID "/covid19/deaths";
+const char* mqttCovidTodayDeaths         = "/" MQTTDEVICEID "/covid19/todayDeaths";
+const char* mqttCovidRecovered           = "/" MQTTDEVICEID "/covid19/recovered";
+const char* mqttCovidActive              = "/" MQTTDEVICEID "/covid19/active";
+const char* mqttCovidCritical            = "/" MQTTDEVICEID "/covid19/critical";
+const char* mqttCovidCasesPerOneMillion  = "/" MQTTDEVICEID "/covid19/casesPerOneMillion";
+const char* mqttCovidDeathsPerOneMillion = "/" MQTTDEVICEID "/covid19/deathsPerOneMillion";
+const char* mqttCovidTime                = "/" MQTTDEVICEID "/covid19/datetime";
+
+
 
 PubSubClient mqttClient(net);
 
 WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP, "europe.pool.ntp.org", GER_TZ_OFFSET, 600000); // 2h offset, 10min update intervall
+NTPClient timeClient(ntpUDP, "europe.pool.ntp.org", GER_TZ_OFFSET); // 2h offset
 
 const int screenW = 128;
 const int screenH = 64;
@@ -106,7 +145,7 @@ OLEDDisplayUi ui(&display);
 
 
 // ******  PROGRAM VERSION ******
-const char* VERSION = "0.4.3";
+const char* VERSION = "0.5.5";
 
 
 void drawProgress(OLEDDisplay *display, int percentage, String label) {
@@ -118,7 +157,7 @@ void drawProgress(OLEDDisplay *display, int percentage, String label) {
   display->display();
 }
 
-void rssiOverlay(OLEDDisplay *display, OLEDDisplayUiState* state) {
+void rssiOverlay(OLEDDisplay *display, _UNUSED_ OLEDDisplayUiState* state) {
   display->setTextAlignment(TEXT_ALIGN_RIGHT);
   display->setFont(ArialMT_Plain_10);
   display->drawString(128, 0, String(WiFi.RSSI()));
@@ -142,16 +181,26 @@ void drawText(OLEDDisplay *display, const char *text) {
   display->clear();
   //display->setTextAlignment(TEXT_ALIGN_LEFT);
   display->setTextAlignment(TEXT_ALIGN_CENTER);
-  display->setFont(ArialMT_Plain_10);
+  display->setFont(ArialMT_Plain_16);
   //display->drawString(display->getWidth()/2, display->getHeight()/2, text);
   //display->drawString(1, display->getHeight()/2, text);
-  display->drawStringMaxWidth(display->getWidth()/2, 0, 128, text);
+  display->drawStringMaxWidth(display->getWidth()/2, 30, 128, text);
   display->display();
 }
 
+// direction = 0 -> DOWN
+// direction = 1 -> UP
+void drawArrow(OLEDDisplay *display, int direction) {
+  display->drawXbm(118, 30, 8, 8, direction == 1 ? upArrow : downArrow);
+}
+void clearArrow(OLEDDisplay *display) {
+  display->drawXbm(118, 30, 8, 8, noArrow);
+}
+
+
 
 // Frames ...
-void startFrame(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y)
+void startFrame(OLEDDisplay *display, _UNUSED_ OLEDDisplayUiState* state, int16_t x, int16_t y)
 {
   display->setFont(ArialMT_Plain_10);
   display->setTextAlignment(TEXT_ALIGN_CENTER);
@@ -166,11 +215,12 @@ void startFrame(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int1
   display->setTextAlignment(TEXT_ALIGN_CENTER);
   display->drawString(64 + x,  33 + y, covid19Data.country);
 
+  clearArrow(display);
   //display->drawXbm(x + 40,   y +  2, mqtt_width, mqtt_height, mqtt_bits);
   //display->drawString(x + 0, y + 50, "v" + String(VERSION) + ", ip: " + ipAddr);
 }
 
-void Frame1(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y)
+void Frame1(OLEDDisplay *display, _UNUSED_ OLEDDisplayUiState* state, int16_t x, int16_t y)
 {
   if (!covid19Data.valid)
     return;
@@ -179,7 +229,7 @@ void Frame1(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t 
   display->drawString(64 + x,  5 + y, "CASES:");
   display->drawString(64 + x, 30 + y, covid19Data.cases);
 }
-void Frame2(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y)
+void Frame2(OLEDDisplay *display, _UNUSED_ OLEDDisplayUiState* state, int16_t x, int16_t y)
 {
   if (!covid19Data.valid)
     return;
@@ -188,7 +238,7 @@ void Frame2(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t 
   display->drawString(64 + x,  5 + y, "TODAY CASES:");
   display->drawString(64 + x, 30 + y, covid19Data.todayCases);
 }
-void Frame3(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y)
+void Frame3(OLEDDisplay *display, _UNUSED_ OLEDDisplayUiState* state, int16_t x, int16_t y)
 {
   if (!covid19Data.valid)
     return;
@@ -197,7 +247,7 @@ void Frame3(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t 
   display->drawString(64 + x,  5 + y, "DEATHS:");
   display->drawString(64 + x, 30 + y, covid19Data.deaths);
 }
-void Frame4(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y)
+void Frame4(OLEDDisplay *display, _UNUSED_ OLEDDisplayUiState* state, int16_t x, int16_t y)
 {
   if (!covid19Data.valid)
     return;
@@ -205,8 +255,10 @@ void Frame4(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t 
   display->setFont(ArialMT_Plain_16);
   display->drawString(64 + x,  5 + y, "TODAY DEATHS:");
   display->drawString(64 + x, 30 + y, covid19Data.todayDeaths);
+
+  clearArrow(display);
 }
-void Frame5(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y)
+void Frame5(OLEDDisplay *display, _UNUSED_ OLEDDisplayUiState* state, int16_t x, int16_t y)
 {
   if (!covid19Data.valid)
     return;
@@ -214,8 +266,12 @@ void Frame5(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t 
   display->setFont(ArialMT_Plain_16);
   display->drawString(64 + x,  5 + y, "ACTIVE:");
   display->drawString(64 + x, 30 + y, covid19Data.active);
+  if (covid19Data.active > covid19Data_prev.active)
+    drawArrow(display, 1);
+  if (covid19Data.active < covid19Data_prev.active)
+    drawArrow(display, 0);
 }
-void Frame6(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y)
+void Frame6(OLEDDisplay *display, _UNUSED_ OLEDDisplayUiState* state, int16_t x, int16_t y)
 {
   if (!covid19Data.valid)
     return;
@@ -223,16 +279,24 @@ void Frame6(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t 
   display->setFont(ArialMT_Plain_16);
   display->drawString(64 + x,  5 + y, "CRITICAL:");
   display->drawString(64 + x, 30 + y, covid19Data.critical);
+  if (covid19Data.critical > covid19Data_prev.critical)
+    drawArrow(display, 1);
+  if (covid19Data.critical < covid19Data_prev.critical)
+    drawArrow(display, 0);
 }
 
-void drawFooDetails(OLEDDisplay *display, int x, int y, int dayIndex) {
-
-}
-
-void drawFoo(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y) {
-  drawFooDetails(display, x, y, 0);
-  drawFooDetails(display, x + 44, y, 1);
-  drawFooDetails(display, x + 88, y, 2);
+void Frame7(OLEDDisplay *display, _UNUSED_ OLEDDisplayUiState* state, int16_t x, int16_t y)
+{
+  if (!covid19Data.valid)
+    return;
+  display->setTextAlignment(TEXT_ALIGN_CENTER);
+  display->setFont(ArialMT_Plain_16);
+  display->drawString(64 + x,  5 + y, "RECOVERED:");
+  display->drawString(64 + x, 30 + y, covid19Data.recovered);
+  if (covid19Data.recovered > covid19Data_prev.recovered)
+    drawArrow(display, 1);
+  if (covid19Data.recovered < covid19Data_prev.recovered)
+    drawArrow(display, 0);
 }
 
 FrameCallback frames[] = { startFrame,
@@ -242,10 +306,11 @@ FrameCallback frames[] = { startFrame,
 			   Frame4,
 			   Frame5,
 			   Frame6,
+			   Frame7
 };
 OverlayCallback overlays[] = { rssiOverlay };
 
-int numberOfFrames   = 7;
+int numberOfFrames   = 8;
 int numberOfOverlays = 1;
 
 
@@ -253,10 +318,18 @@ int setupWifi() {
   DEBUG_PRINTLN();
   DEBUG_PRINTLN("Connecting to wifi");
 
+  unsigned retry_counter = 0;
+#ifdef ESP32
   WiFi.begin(wifi_ssid, wifi_pass);
 
-  unsigned retry_counter = 0;
   while (WiFi.status() != WL_CONNECTED) {
+#else
+  WiFi.mode(WIFI_STA);
+  WiFiMulti.addAP(wifi_ssid, wifi_pass);
+
+  while ((WiFiMulti.run() != WL_CONNECTED)) {
+#endif
+
     delay(500);
     DEBUG_PRINT(".");
 
@@ -268,7 +341,7 @@ int setupWifi() {
     display.display();
 
     retry_counter++;
-    if (retry_counter > max_wifi_wait_seconds) {
+    if (retry_counter > maxWifiWaitSeconds) {
       DEBUG_PRINTLN(" TIMEOUT!");
       display.clear();
       display.drawString(64, 10, "Wifi TIMEOUT");
@@ -300,10 +373,10 @@ void mqttConnect()
   connect_msg += VERSION;
 
   // Attempt to connect
-  if (mqttClient.connect(mqtt_device_id, mqtt_user, mqtt_pass, "/esp32oled/state", 1, 1, "OFFLINE")) {
+  if (mqttClient.connect(MQTTDEVICEID, mqtt_user, mqtt_pass, mqttState, 1, 1, "OFFLINE")) {
     DEBUG_PRINTLN("connected");
     // Once connected, publish an announcement...
-    mqttClient.publish("/esp32oled/state", connect_msg.c_str(), true);
+    mqttClient.publish(mqttState, connect_msg.c_str(), true);
   }
   else {
     DEBUG_PRINT("failed, mqttClient.state = ");
@@ -325,8 +398,8 @@ void mqttCallback(char* topic, byte* payload, unsigned int length)
 
   DEBUG_PRINTLN(value);
 
-  if (0 == strcmp("/esp32oled/set", topic)) {
-    DEBUG_PRINTLN("wemos esp32oled set");
+  if (0 == strcmp(mqttSet, topic)) {
+    DEBUG_PRINTLN("wemos esp oled set topic");
     if (0 == memcmp("logo", payload, 4)) {
       DEBUG_PRINTLN("wemos set logo");
       //drawLogo(&display);
@@ -350,7 +423,9 @@ void mqttCallback(char* topic, byte* payload, unsigned int length)
     "critical":1979,
     "casesPerOneMillion":753,
     "deathsPerOneMillion":7,
-    "firstCase":"\nJan 26 "}
+    "totalTests":918460,
+    "testsPerOneMillion":10962
+    }
  */
 int isValidNumber(int num)
 {
@@ -385,29 +460,49 @@ int isValidData(JsonObject data)
 
 int getCovid19Data(OLEDDisplay *display)
 {
-  HTTPClient http;
   int rc = 0;
+  covid19Data_prev = covid19Data;
 
+  DEBUG_PRINTLN("getCovid19Data start");
   drawProgress(display, 10, "Updating time...");
   timeClient.forceUpdate();
 
   drawProgress(display, 40, "Fetching data...");
-  http.begin(COVID19_DATA_URL, herokuapp_com_pem_str);
 
-  int httpCode = http.GET();
+  //XXXXXXXXXXXXXXXXXXXXXX
+  //std::unique_ptr<BearSSL::WiFiClientSecure>client(new BearSSL::WiFiClientSecure);
+  //https_client.setTrustAnchors
+  
+  //HTTPClient https;
+#ifdef ESP32
+  HTTPClient https;
+  https.begin(COVID19_DATA_URL, herokuapp_com_pem_str);
+#else
+  std::unique_ptr<BearSSL::WiFiClientSecure>https_client(new BearSSL::WiFiClientSecure);
+  https_client->setFingerprint(herokuapp_com_fingerprint);
+
+  HTTPClient https;
+  https.begin(*https_client, COVID19_DATA_URL);
+  //if (https.begin(*client, "https://jigsaw.w3.org/HTTP/connection.html")) {  // HTTPS
+#endif
+  
+  int httpCode = https.GET();
 
   if (httpCode > 0) { //Check for the returning code
-    String payload = http.getString();
+    String payload = https.getString();
     //DEBUG_PRINTLN("httpcode and payload:");
     //DEBUG_PRINTLN(httpCode);
     DEBUG_PRINTLN(payload);
 
     // https://arduinojson.org/v6/assistant/
-    const size_t capacity = JSON_OBJECT_SIZE(11) + 160;
+    const size_t capacity = JSON_OBJECT_SIZE(12) + 170;
     DynamicJsonDocument jsonBuffer(capacity);
+
+    DEBUG_PRINTLN("deserializeJson...");
 
     auto error = deserializeJson(jsonBuffer, payload);
     if (error) {
+      drawText(display, "Error parsing GET response");
       DEBUG_PRINTLN(F("Error with response: deserializeJson() failed:"));
       DEBUG_PRINTLN(error.c_str());
       covid19Data.valid = false;
@@ -415,8 +510,7 @@ int getCovid19Data(OLEDDisplay *display)
     }
     else {
       if (isValidData(jsonBuffer.as<JsonObject>())) {
-	//covid19Data = jsonBuffer.as<JsonObject>();
-	//covid19Data = jsonBuffer;
+
 	covid19Data.valid = true;
 	covid19Data.country		= jsonBuffer["country"].as<String>();
 	covid19Data.cases		= jsonBuffer["cases"].as<String>();
@@ -429,31 +523,37 @@ int getCovid19Data(OLEDDisplay *display)
 	covid19Data.casesPerOneMillion	= jsonBuffer["casesPerOneMillion"].as<String>();
 	covid19Data.deathsPerOneMillion = jsonBuffer["deathsPerOneMillion"].as<String>();
 
-	mqttClient.publish("/esp32oled/covid19/country",	     covid19Data.country.c_str());
-	mqttClient.publish("/esp32oled/covid19/cases",		     covid19Data.cases.c_str());
-	mqttClient.publish("/esp32oled/covid19/todayCases",	     covid19Data.todayCases.c_str());
-	mqttClient.publish("/esp32oled/covid19/deaths",		     covid19Data.deaths.c_str());
-	mqttClient.publish("/esp32oled/covid19/todayDeaths",	     covid19Data.todayDeaths.c_str());
-	mqttClient.publish("/esp32oled/covid19/recovered",	     covid19Data.recovered.c_str());
-	mqttClient.publish("/esp32oled/covid19/active",		     covid19Data.active.c_str());
-	mqttClient.publish("/esp32oled/covid19/critical",	     covid19Data.critical.c_str());
-	mqttClient.publish("/esp32oled/covid19/casesPerOneMillion",  covid19Data.casesPerOneMillion.c_str());
-	mqttClient.publish("/esp32oled/covid19/deathsPerOneMillion", covid19Data.deathsPerOneMillion.c_str());
-	mqttClient.publish("/esp32oled/covid19/datetime",	     timeClient.getFormattedTime().c_str());
+	// if (publish via mqtt ... ) maybe enable/disable via mqtt SET topic
+	mqttClient.publish(mqttCovidCountry,             covid19Data.country.c_str());
+	mqttClient.publish(mqttCovidCases,               covid19Data.cases.c_str());
+	mqttClient.publish(mqttCovidTodayCases,          covid19Data.todayCases.c_str());
+	mqttClient.publish(mqttCovidDeaths,              covid19Data.deaths.c_str());
+	mqttClient.publish(mqttCovidTodayDeaths,         covid19Data.todayDeaths.c_str());
+	mqttClient.publish(mqttCovidRecovered,           covid19Data.recovered.c_str());
+	mqttClient.publish(mqttCovidActive,              covid19Data.active.c_str());
+	mqttClient.publish(mqttCovidCritical,            covid19Data.critical.c_str());
+	mqttClient.publish(mqttCovidCasesPerOneMillion,  covid19Data.casesPerOneMillion.c_str());
+	mqttClient.publish(mqttCovidDeathsPerOneMillion, covid19Data.deathsPerOneMillion.c_str());
+	mqttClient.publish(mqttCovidTime,	         timeClient.getFormattedTime().c_str());
       }
     }
   }
   else {
+    //drawText(display, "Error: GET failed");
     DEBUG_PRINTLN("Error on HTTP request");
     covid19Data.valid = false;
+    drawProgress(display, 100, "... FAILED");
+    delay(2000);
     rc = 1;
   }
   delay(1000);
-  drawProgress(display, 80, "Fetching data...");
-  delay(1000);
-  drawProgress(display, 100, "... Done");
-
-  http.end(); // Free the resources
+  if (1 != rc) {
+    drawProgress(display, 80, "Fetching data...");
+    delay(1000);
+    drawProgress(display, 100, "... Done");
+  }
+  https.end(); // Free the resources
+  DEBUG_PRINTLN("getCovid19Data DONE");
   return rc;
 }
 
@@ -502,6 +602,8 @@ void setup() {
   //  net.allowSelfSignedCerts();
   DEBUG_PRINTLN("setClientRSACert() client cert and key");
   net.setClientRSACert(&client_crt, &client_key);
+
+  //https_client.setTrustAnchors(&herokuapp_cert);
 #endif
 
   DEBUG_PRINTLN("set mqtt host/port and callback");
@@ -510,12 +612,6 @@ void setup() {
 
   DEBUG_PRINTLN("calling mqttConnect()");
   mqttConnect();
-
-
-  timeClient.begin();
-  //configTime(TZ_SEC, DST_SEC, "pool.ntp.org");
-  //delay(1000);
-
 
   // display gui setup
   ui.setTargetFPS(30);
@@ -538,13 +634,15 @@ void setup() {
   drawLogo(&display);
   drawInfo(&display);
 
+  timeClient.begin();
   timeClient.forceUpdate();
+  delay(1000);
   DEBUG_PRINTLN(timeClient.getFormattedTime());
-  mqttClient.publish("/esp32oled/datetime", timeClient.getFormattedTime().c_str());
+  mqttClient.publish(mqttDateTime, timeClient.getFormattedTime().c_str());
 
   if (getCovid19Data(&display)) {
     DEBUG_PRINTLN("Error getting data");
-    mqttClient.publish("/esp32oled/state", "ERROR: getCovid19Data");
+    mqttClient.publish(mqttState, "ERROR: getCovid19Data");
   }
 }
 
@@ -556,15 +654,15 @@ void loop() {
   // }
 
   // get data every X minute(s) / hour(s) ...
-  //  if (millis() > (time_1 + EVERY_MINUTE)) {
-  if (millis() > (time_1 + EVERY_HOUR)) {
+  if (millis() > (time_1 + 10*EVERY_MINUTE)) {
+//if (millis() > (time_1 + EVERY_HOUR)) {
     readyForNewData = true;
     time_1 = millis();
   }
 
   if (readyForNewData && ui.getUiState()->frameState == FIXED) {
-    getCovid19Data(&display);
-    readyForNewData = false;
+    if (0 == getCovid19Data(&display))
+      readyForNewData = false;
   }
 
   int remainingTimeBudget = ui.update();
