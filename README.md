@@ -16,6 +16,13 @@ copy and paste your CA (which was used to gernerate client cert and private key)
 
 copy client crt and key file to the respective client.crt.h and client.key.h file
 
+
+### arduino board config example ESP-WROOM-32
+
+![Alt text](arduino-ide-tools-board-config.png?raw=true "board config arduino ide")
+board has 0.96" OLED 128x64
+
+
 ## publish string
     mosquitto_pub -h host -p 8888 -u user -P pass --cafile myCA.pem \
 		  --cert client.crt \
