@@ -3,6 +3,7 @@ get data from https://coronavirus-19-api.herokuapp.com and display on oled displ
 
 using esp8266/esp32 to connect securely (tls) to mqtt (mosquitto) server and publish the data as well
 
+NOTE: esp8266 has a hard time with simultaneously hanlding http and mqtt with tls ... aka did not get it to work in the esp8266.
 
 [![IMAGE ALT TEXT](http://img.youtube.com/vi/HXPUzBh-PUc/0.jpg)](https://www.youtube.com/watch?v=HXPUzBh-PUc "Video")
 
