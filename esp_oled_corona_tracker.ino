@@ -179,11 +179,8 @@ void drawInfo(OLEDDisplay *display) {
 void drawText(OLEDDisplay *display, const char *text) {
   // Align text vertical/horizontal center
   display->clear();
-  //display->setTextAlignment(TEXT_ALIGN_LEFT);
   display->setTextAlignment(TEXT_ALIGN_CENTER);
   display->setFont(ArialMT_Plain_16);
-  //display->drawString(display->getWidth()/2, display->getHeight()/2, text);
-  //display->drawString(1, display->getHeight()/2, text);
   display->drawStringMaxWidth(display->getWidth()/2, 30, 128, text);
   display->display();
 }
@@ -483,7 +480,6 @@ int getCovid19Data(OLEDDisplay *display)
 
   HTTPClient https;
   https.begin(*https_client, COVID19_DATA_URL);
-  //if (https.begin(*client, "https://jigsaw.w3.org/HTTP/connection.html")) {  // HTTPS
 #endif
   
   int httpCode = https.GET();
@@ -648,14 +644,8 @@ void setup() {
 
 
 void loop() {
-  // // still connected ...?
-  // if (WiFi.status() != WL_CONNECTED) {
-  //   setupWifi();
-  // }
-
   // get data every X minute(s) / hour(s) ...
-  if (millis() > (time_1 + 10*EVERY_MINUTE)) {
-//if (millis() > (time_1 + EVERY_HOUR)) {
+  if (millis() > (time_1 + EVERY_HOUR)) {
     readyForNewData = true;
     time_1 = millis();
   }
@@ -673,13 +663,4 @@ void loop() {
 
     delay(remainingTimeBudget);
   }
-
-  // if ((WiFi.status() == WL_CONNECTED) && (!mqttClient.connected())) {
-  //   DEBUG_PRINTLN("no mqtt connection!!!");
-  //   mqttConnect();
-  // }
-  // else {
-  //   mqttClient.loop();
-  // }
-
 }
